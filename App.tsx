@@ -35,18 +35,18 @@ const App: React.FC = () => {
         setBiomeHistory(prev => [...prev, newEnv.name]);
       }
     } catch (err) {
-      console.error("Biome shift fetch failed", err);
+      // Errors are now handled silently in the service returning fallbacks
     } finally {
-      // Cooldown to prevent rapid API requests, even on failure
-      setTimeout(() => setIsTransitioning(false), 10000);
+      // Significant cooldown (30s) to prevent any burst of requests
+      setTimeout(() => setIsTransitioning(false), 30000);
     }
   }, [biomeHistory, isTransitioning]);
 
   useEffect(() => {
     if (gameState !== GameState.PLAYING) return;
     
-    // Increased milestone from 1000 to 2000 to reduce API call frequency
-    const milestone = Math.floor(score / 2000);
+    // Increased milestone significantly to 5000 to drastically reduce API call frequency
+    const milestone = Math.floor(score / 5000);
     if (milestone > lastShiftRef.current && !isTransitioning) {
       lastShiftRef.current = milestone;
       handleBiomeShift(score);
@@ -57,8 +57,6 @@ const App: React.FC = () => {
     if (event === 'COLLECT') setClout(prev => prev + 10);
     else if (event === 'NEAR_MISS') setClout(prev => prev + 100);
     else if (event === 'LEVEL_UP') setClout(prev => prev + 500);
-
-    // Chat reactions are currently disabled per previous request to save quota
   }, []);
 
   const startGame = useCallback(() => {

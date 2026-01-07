@@ -48,17 +48,36 @@ const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
 // Global throttle and circuit breaker to prevent overlapping rapid requests and handle 429s
 let lastRequestTime = 0;
-const MIN_REQUEST_INTERVAL = 10000; // Increased to 10 seconds between API calls
+const MIN_REQUEST_INTERVAL = 15000; // 15 seconds between successful API calls
 let circuitOpenUntil = 0;
-const CIRCUIT_BREAKER_DURATION = 300000; // Increased to 5 minutes cooldown on 429
+const CIRCUIT_BREAKER_DURATION = 600000; // 10 minute cooldown on any 429 error
+
+/**
+ * Checks if an error object represents a 429 Rate Limit
+ */
+function isRateLimitError(error: any): boolean {
+  if (!error) return false;
+  
+  // Check common error formats for 429
+  const code = error?.status || error?.error?.code || error?.code;
+  if (code === 429) return true;
+
+  const errorStr = JSON.stringify(error).toLowerCase();
+  return (
+    errorStr.includes("429") || 
+    errorStr.includes("resource_exhausted") || 
+    errorStr.includes("quota exceeded") ||
+    errorStr.includes("too many requests")
+  );
+}
 
 /**
  * Exponential backoff wrapper for API calls with robust 429 detection and circuit breaker
  */
-async function withRetry<T>(fn: () => Promise<T>, maxRetries = 2, baseDelay = 5000): Promise<T> {
+async function withRetry<T>(fn: () => Promise<T>, maxRetries = 1, baseDelay = 5000): Promise<T | null> {
   const now = Date.now();
   if (now < circuitOpenUntil) {
-    throw new Error("RATE_LIMIT_COOLDOWN");
+    return null; // Silently fail to fallback
   }
 
   const timeSinceLast = now - lastRequestTime;
@@ -72,40 +91,33 @@ async function withRetry<T>(fn: () => Promise<T>, maxRetries = 2, baseDelay = 50
     try {
       return await fn();
     } catch (error: any) {
-      const errorStr = JSON.stringify(error).toLowerCase();
-      const isRateLimit = 
-        error?.status === 429 || 
-        error?.error?.code === 429 || 
-        error?.message?.includes("429") ||
-        errorStr.includes("429") ||
-        errorStr.includes("resource_exhausted") ||
-        errorStr.includes("quota exceeded");
-
-      if (isRateLimit) {
+      if (isRateLimitError(error)) {
         circuitOpenUntil = Date.now() + CIRCUIT_BREAKER_DURATION;
-        console.warn(`Gemini API rate limited (429). Circuit breaker engaged for ${CIRCUIT_BREAKER_DURATION/1000}s.`);
-        throw new Error("RATE_LIMIT_COOLDOWN");
+        console.warn(`Gemini API Quota Exhausted. Using local fallbacks for ${CIRCUIT_BREAKER_DURATION/60000} mins.`);
+        return null; // Return null to signal immediate fallback without logging error
       }
       
       if (attempt < maxRetries) {
         attempt++;
-        const delay = baseDelay * Math.pow(2, attempt - 1);
-        await sleep(delay);
+        await sleep(baseDelay * Math.pow(2, attempt - 1));
         continue;
       }
       throw error;
     }
   }
-  throw new Error("Max retries exceeded");
+  return null;
 }
 
 export const fetchNewEnvironment = async (
   currentScore: number, 
   previousBiomes: string[]
 ): Promise<Environment | null> => {
-  // Quick exit if circuit is open to avoid any logs
+  // Check circuit before even creating prompt
   if (Date.now() < circuitOpenUntil) {
-    return FALLBACK_ENVIRONMENTS[Math.floor(Math.random() * FALLBACK_ENVIRONMENTS.length)];
+    const availableFallbacks = FALLBACK_ENVIRONMENTS.filter(e => !previousBiomes.includes(e.name));
+    return availableFallbacks.length > 0 
+      ? availableFallbacks[Math.floor(Math.random() * availableFallbacks.length)]
+      : FALLBACK_ENVIRONMENTS[Math.floor(Math.random() * FALLBACK_ENVIRONMENTS.length)];
   }
 
   try {
@@ -123,12 +135,14 @@ export const fetchNewEnvironment = async (
       return response.text;
     });
 
-    if (!result) return FALLBACK_ENVIRONMENTS[Math.floor(Math.random() * FALLBACK_ENVIRONMENTS.length)];
+    if (!result) throw new Error("FALLBACK_SIGNAL"); // Trigger local fallback logic below
     return JSON.parse(result) as Environment;
   } catch (error: any) {
-    if (error?.message !== "RATE_LIMIT_COOLDOWN") {
-      console.error("Gemini Environment Fetch Failed (falling back):", error);
+    // Only log non-rate-limit errors
+    if (error?.message !== "FALLBACK_SIGNAL") {
+      console.error("Gemini service encountered an issue:", error);
     }
+    
     const availableFallbacks = FALLBACK_ENVIRONMENTS.filter(e => !previousBiomes.includes(e.name));
     return availableFallbacks.length > 0 
       ? availableFallbacks[Math.floor(Math.random() * availableFallbacks.length)]
@@ -154,14 +168,9 @@ export const fetchChatComments = async (biomeName: string, event: string): Promi
       return response.text;
     });
 
-    return JSON.parse(result || "[]");
+    if (!result) return [];
+    return JSON.parse(result);
   } catch (error: any) {
-    if (error?.message !== "RATE_LIMIT_COOLDOWN") {
-      console.error("Gemini Chat Fetch Failed (falling back):", error);
-    }
-    return FALLBACK_COMMENTS.sort(() => Math.random() - 0.5).slice(0, 3).map(c => ({
-      ...c,
-      text: Math.random() > 0.5 ? `${c.text} [SIGNAL LOSS]` : c.text
-    }));
+    return [];
   }
 };
