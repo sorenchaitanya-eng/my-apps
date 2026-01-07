@@ -1,0 +1,7 @@
+{
+  "name": "Copy of Neon Rift Runner",
+  "description": "An endless 2D side-scrolling runner with dynamic environment generation powered by Gemini.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
